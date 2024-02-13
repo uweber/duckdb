@@ -1,3 +1,4 @@
+#include <arpa/inet.h>
 #include "ipaddress.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/types/cast_helpers.hpp"
@@ -28,55 +29,40 @@ bool IPAddress::TryParse(string_t input, IPAddress &result, string *error_messag
 	auto size = input.GetSize();
 	idx_t c = 0;
 	idx_t number_count = 0;
-	uint32_t address = 0;
-	result.type = IPAddressType::IP_ADDRESS_V4;
-parse_number:
-	idx_t start = c;
-	while (c < size && data[c] >= '0' && data[c] <= '9') {
-		c++;
-	}
-	if (start == c) {
-		return IPAddressError(input, error_message, "Expected a number");
-	}
-	uint8_t number;
-	if (!TryCast::Operation<string_t, uint8_t>(string_t(data + start, c - start), number)) {
-		return IPAddressError(input, error_message, "Expected a number between 0 and 255");
-	}
-	address <<= 8;
-	address += number;
-	number_count++;
-	result.address = address;
-	if (number_count == 4) {
-		goto parse_mask;
-	} else {
-		goto parse_dot;
-	}
-parse_dot:
-	if (c == size || data[c] != '.') {
-		return IPAddressError(input, error_message, "Expected a dot");
-	}
-	c++;
-	goto parse_number;
-parse_mask:
-	if (c == size) {
-		// no mask, set to default
+
+	if (inet_pton(AF_INET, data, &result.address)) {
+		result.type = IPAddressType::IP_ADDRESS_V4;
 		result.mask = IPAddress::IPV4_DEFAULT_MASK;
+	}
+	else if (inet_pton(AF_INET6, data, &result.address)) {
+		result.type = IPAddressType::IP_ADDRESS_V6;
+		result.mask = IPAddress::IPV6_DEFAULT_MASK;
+	}
+	else {
+		return IPAddressError(input, error_message, "Failed to parse IP address");
+	}
+
+	for (c = 0; c < size; c++) {
+		if (data[c] == '/')
+			break;
+	}
+
+	if (c == size) {
+		// no mask, use default for address family
 		return true;
 	}
-	if (data[c] != '/') {
-		return IPAddressError(input, error_message, "Expected a slash");
-	}
+
 	c++;
-	start = c;
+	idx_t start = c;
 	while (c < size && data[c] >= '0' && data[c] <= '9') {
 		c++;
 	}
 	uint8_t mask;
 	if (!TryCast::Operation<string_t, uint8_t>(string_t(data + start, c - start), mask)) {
-		return IPAddressError(input, error_message, "Expected a number between 0 and 32");
+		return IPAddressError(input, error_message, "Faied to parse IP network mask");
 	}
-	if (mask > 32) {
-		return IPAddressError(input, error_message, "Expected a number between 0 and 32");
+	if (mask > result.mask) {
+		return IPAddressError(input, error_message, "Expected a number between 0-32 for IPv4 and 0-128 for IPv6");
 	}
 	result.mask = mask;
 	return true;
@@ -84,15 +70,13 @@ parse_mask:
 
 string IPAddress::ToString() const {
 	string result;
-	for (idx_t i = 0; i < 4; i++) {
-		if (i > 0) {
-			result += ".";
-		}
-		uint8_t byte = Hugeint::Cast<uint8_t>((address >> (3 - i) * 8) & 0xFF);
-		auto str = to_string(byte);
-		result += str;
-	}
-	if (mask != IPAddress::IPV4_DEFAULT_MASK) {
+	char buffer[INET6_ADDRSTRLEN];
+
+	inet_ntop(type == IPAddressType::IP_ADDRESS_V4 ? AF_INET : AF_INET6, &address, buffer, INET6_ADDRSTRLEN);
+	result.append(buffer);
+
+	if ((type == IPAddressType::IP_ADDRESS_V4 && mask != IPAddress::IPV4_DEFAULT_MASK) ||
+	    (type == IPAddressType::IP_ADDRESS_V6 && mask != IPAddress::IPV6_DEFAULT_MASK)) {
 		result += "/" + to_string(mask);
 	}
 	return result;
